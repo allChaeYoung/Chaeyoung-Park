@@ -1,0 +1,64 @@
+from botorch.models.transforms.outcome import Standardize
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from botorch.utils.sampling import draw_sobol_samples
+from botorch.models import KroneckerMultiTaskGP, SingleTaskGP
+from botorch.models.gp_regression import FixedNoiseGP
+from botorch.models.model_list_gp_regression import ModelListGP
+from gpytorch.constraints import GreaterThan, LessThan, Interval, Positive
+from botorch.fit import fit_gpytorch_mll, fit_gpytorch_model
+from gpytorch.kernels import MaternKernel, RBFKernel
+from gpytorch.priors.torch_priors import GammaPrior, NormalPrior
+import os
+import torch
+import numpy as np
+import warnings 
+import matplotlib.pyplot as plt
+from scipy.stats import gamma
+from gpytorch.priors import LKJCovariancePrior
+from gpytorch.priors.smoothed_box_prior import SmoothedBoxPrior
+
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+tkwargs = {
+    "dtype": torch.double,
+    "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+}
+
+train_x = np.load('SNU_Traindata_x_240823_1st.npy')
+train_y = np.load('SNU_Traindata_y_240826_2nd_test.npy')
+
+train_x = torch.from_numpy(train_x).to(**tkwargs)
+train_y = torch.from_numpy(train_y).to(**tkwargs)
+
+# Data cov matrix
+batch_shape, ard_num_dims = train_x.shape[:-2], train_x.shape[-1]
+
+initial_point = torch.tensor([5., 2., 20,], **tkwargs)
+
+Custom_RBF_kernel = MaternKernel(
+    nu = 1.5,
+    initial_lengthscale = initial_point,
+    lengthscale_prior = None,
+    lengthscale_constraint=Interval(1e0, 1e2),
+    ard_num_dims = ard_num_dims,
+    batch_shape = batch_shape,
+)
+# amplitude 설정
+Custom_RBF_kernel.amplitude = 2.
+
+# Task cov matrix
+num_task = train_y.shape[-1]
+
+Custom_Task_kernel = LKJCovariancePrior(
+                n=num_task,
+                eta = torch.tensor(1.5).to(train_x),
+                sd_prior = SmoothedBoxPrior(np.exp(0), np.exp(1), 0.01),
+                )
+
+mtgp = KroneckerMultiTaskGP(train_x, train_y, 
+                            data_covar_module=Custom_RBF_kernel,
+                            task_covar_prior=Custom_Task_kernel)
+mtgp.likelihood.register_constraint("raw_noise", Interval(1e-4, 1e-3))
+mtgp_mll = ExactMarginalLogLikelihood(mtgp.likelihood, mtgp)
+fit_gpytorch_model(mtgp_mll)
+
