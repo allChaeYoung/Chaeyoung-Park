@@ -1,0 +1,95 @@
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import torch.nn as nn
+import torch
+import numpy as np
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error, r2_score
+
+# Neural Network 
+class SimpleNN(nn.Module):
+    def __init__(self):
+        # 2 Hidden layers, 3 Nodes
+        super(SimpleNN, self).__init__()
+        self.fc1 = nn.Linear(in_features=3, out_features=3)
+        self.fc2 = nn.Linear(in_features=3, out_features=3)
+        self.fc3 = nn.Linear(in_features=3, out_features=2)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+# tkwargs 
+tkwargs = {
+    "dtype": torch.double,
+    "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+}
+
+train_x = np.load('SNU_Traindata_x_240823_1st.npy')
+train_y = np.load('SNU_Traindata_y_240826_2nd_test.npy')
+
+raw_X = torch.from_numpy(train_x).to(**tkwargs)
+raw_y = torch.from_numpy(train_y).to(**tkwargs)
+
+
+# KFold 
+kf = KFold(n_splits=3, shuffle=True, random_state=42)
+mse_scores = []
+r2_scores = []
+adj_r2_scores = []
+
+# K-Fold 
+for fold, (train_idx, test_idx) in enumerate(kf.split(X)):
+    print(f'Fold {fold + 1}')
+    
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    train_dataset = TensorDataset(X_train, y_train)
+    train_loader = DataLoader(dataset=train_dataset, batch_size=2, shuffle=True)
+
+    model = SimpleNN().to(**tkwargs)
+
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    def train(model, data_loader, criterion, optimizer, epochs=50):
+        model.train()
+        for epoch in range(epochs):
+            for batch_idx, (inputs, targets) in enumerate(data_loader):
+                inputs, targets = inputs.to(**tkwargs), targets.to(**tkwargs)
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+
+    train(model, train_loader, criterion, optimizer, epochs=50)
+
+    model.eval()
+    with torch.no_grad():
+        y_pred = model(X_test).cpu().numpy() 
+        y_test_cpu = y_test.cpu().numpy() 
+
+    mse = mean_squared_error(y_test_cpu, y_pred)
+    mse_scores.append(mse)
+
+    r2 = r2_score(y_test_cpu, y_pred)
+    r2_scores.append(r2)
+
+    n = len(y_test_cpu)
+    p = X_train.shape[1]  
+    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1)
+    adj_r2_scores.append(adj_r2)
+
+    print(f'Fold {fold + 1} MSE: {mse:.4f}, R²: {r2:.4f}, Adjusted R²: {adj_r2:.4f}')
+
+mean_mse = np.mean(mse_scores)
+mean_r2 = np.mean(r2_scores)
+mean_adj_r2 = np.mean(adj_r2_scores)
+
+print(f'Average MSE over {kf.n_splits} folds: {mean_mse:.4f}')
+print(f'Average R² over {kf.n_splits} folds: {mean_r2:.4f}')
+print(f'Average Adjusted R² over {kf.n_splits} folds: {mean_adj_r2:.4f}')
