@@ -1,0 +1,99 @@
+from botorch.acquisition.multi_objective.objective import IdentityMCMultiOutputObjective
+from typing import List, Optional
+from torch import Tensor
+from botorch.optim.optimize import optimize_acqf, optimize_acqf_discrete
+from botorch.acquisition.multi_objective.objective import GenericMCMultiOutputObjective
+from botorch.utils.multi_objective.scalarization import get_chebyshev_scalarization
+from botorch.utils.multi_objective.box_decompositions.non_dominated import (
+    FastNondominatedPartitioning,
+)
+from botorch.acquisition.multi_objective.monte_carlo import (
+    qExpectedHypervolumeImprovement,
+    qNoisyExpectedHypervolumeImprovement,
+)
+from botorch.utils.sampling import sample_simplex
+import itertools
+
+dim1_values = range(5, 45, 5) 
+dim2_values = range(2, 22, 2)  
+dim3_values = range(30, 190, 20)  
+
+all_combinations = list(itertools.product(dim1_values, dim2_values, dim3_values))
+all_combinations_np = np.array(all_combinations)
+choices = torch.from_numpy(all_combinations_np).to(**tkwargs)
+
+ref_point = torch.tensor([-0.1813196,  -1.04942529], **tkwargs)
+
+def custom_objective_modified(Y, X):
+    #V_th_goal = torch.tensor(0, **tkwargs)
+    return torch.stack([-(Y[..., 0].pow(2)), Y[..., 1]], dim=-1)
+
+objective = GenericMCMultiOutputObjective(objective=custom_objective_modified)
+
+BATCH_SIZE = 10
+
+def optimize_qnehvi_and_get_observation(model, train_x, train_obj, sampler):
+    acq_func = qNoisyExpectedHypervolumeImprovement(
+        model=model,
+        ref_point=ref_point.tolist(),  # use known reference point
+        X_baseline=train_x, # design points that have already been observed. 
+        prune_baseline=True,  # prune baseline points that have estimated zero probability of being Pareto optimal
+        sampler=sampler,
+        objective=objective,
+        cache_root=False,
+    )
+    # optimize
+    candidates, acq_value = optimize_acqf_discrete(
+    acq_function=acq_func,
+    q=BATCH_SIZE,  
+    choices=choices,
+    max_batch_size=10, 
+    unique=True, 
+    )
+    # observe new values
+    new_x = candidates.detach()
+
+    return new_x
+
+import time
+import warnings
+
+from botorch import fit_gpytorch_mll
+from botorch.exceptions import BadInitialCandidatesWarning
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.utils.multi_objective.box_decompositions.dominated import (
+    DominatedPartitioning,
+)
+from botorch.utils.multi_objective.pareto import is_non_dominated
+
+warnings.filterwarnings("ignore", category=BadInitialCandidatesWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+MC_SAMPLES = 10000
+
+# define the qEI and qNEI acquisition modules using a QMC sampler
+qnehvi_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([MC_SAMPLES]))
+
+    # optimize acquisition functions and get new observations
+new_x_qnehvi = optimize_qnehvi_and_get_observation(
+        mtgp, train_x, train_y, qnehvi_sampler
+    )
+
+mtgp.eval()
+with torch.no_grad():
+    pred_qnehvi_can = mtgp.posterior(new_x_qnehvi).mean
+    var_qnehvi_can = mtgp.posterior(new_x_qnehvi).variance
+    
+var_to_std = torch.sqrt(var_qnehvi_can)
+std_qnehvi_can = var_to_std.cpu().detach().numpy()
+
+# Calculate Hypervolume
+import copy
+train_y_new = copy.deepcopy(train_y)
+Eval_Vth_new = -(train_y_new[:,0].pow(2))
+train_y_new[:,0] = Eval_Vth_new
+
+bd = DominatedPartitioning(ref_point=ref_point, Y=train_y_new)
+volume = bd.compute_hypervolume().item()
+
+print(volume)
